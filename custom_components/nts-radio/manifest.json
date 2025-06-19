@@ -1,0 +1,13 @@
+{
+  "domain": "nts_radio",
+  "name": "NTS Radio",
+  "codeowners": ["@user"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://www.nts.live/",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "loggers": ["nts_radio"],
+  "requirements": [],
+  "version": "1.0.0"
+}

@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure NTS Radio",
+        "description": "Set up the NTS Radio integration to see what's currently playing on both channels.",
+        "data": {
+          "update_interval": "Update interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "NTS Radio is already configured"
+    }
+  }
+}
