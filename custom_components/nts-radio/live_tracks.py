@@ -1,6 +1,7 @@
 """Live tracks handler for NTS Radio integration."""
 
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime
@@ -249,7 +250,9 @@ class NTSLiveTracksHandler:
                         ):
                             for artist in artist_names["arrayValue"]["values"]:
                                 if "stringValue" in artist and artist["stringValue"]:
-                                    artists.append(artist["stringValue"])
+                                    # Decode HTML entities in artist names
+                                    artist_name = html.unescape(artist["stringValue"])
+                                    artists.append(artist_name)
 
                         # Extract song title
                         song_title = ""
@@ -257,7 +260,8 @@ class NTSLiveTracksHandler:
                             "song_title" in fields
                             and "stringValue" in fields["song_title"]
                         ):
-                            song_title = fields["song_title"]["stringValue"]
+                            # Decode HTML entities in song title
+                            song_title = html.unescape(fields["song_title"]["stringValue"])
 
                         # Only add tracks that have either artists or title (not empty)
                         if artists or song_title:

@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta
+import html
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,13 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 API_URL = "https://www.nts.live/api/v2/live"
+
+
+def decode_html_entities(text: str) -> str:
+    """Decode HTML entities in text."""
+    if text:
+        return html.unescape(text)
+    return text
 
 
 class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
@@ -95,10 +103,40 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
                         channel_name = channel_data.get("channel_name")
                         if channel_name:
                             channel_key = f"channel_{channel_name}"
+                            
+                            # Get now and next data
+                            now_data = channel_data.get("now", {})
+                            next_data = channel_data.get("next", {})
+                            
+                            # Decode HTML entities in broadcast titles
+                            if "broadcast_title" in now_data:
+                                now_data["broadcast_title"] = decode_html_entities(
+                                    now_data["broadcast_title"]
+                                )
+                            if "broadcast_title" in next_data:
+                                next_data["broadcast_title"] = decode_html_entities(
+                                    next_data["broadcast_title"]
+                                )
+                            
+                            # Decode HTML entities in descriptions
+                            now_embeds = now_data.get("embeds", {})
+                            now_details = now_embeds.get("details", {})
+                            if "description" in now_details:
+                                now_details["description"] = decode_html_entities(
+                                    now_details["description"]
+                                )
+                            
+                            next_embeds = next_data.get("embeds", {})
+                            next_details = next_embeds.get("details", {})
+                            if "description" in next_details:
+                                next_details["description"] = decode_html_entities(
+                                    next_details["description"]
+                                )
+                            
                             processed_data[channel_key] = {
                                 "channel_name": channel_name,
-                                "now": channel_data.get("now", {}),
-                                "next": channel_data.get("next", {}),
+                                "now": now_data,
+                                "next": next_data,
                             }
 
                             # Add live track data if available
