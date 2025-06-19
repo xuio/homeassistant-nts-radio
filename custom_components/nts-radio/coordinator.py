@@ -1,17 +1,27 @@
-"""Data update coordinator for NTS Radio integration."""
+"""Data update coordinator for NTS Radio."""
 
+import asyncio
+from datetime import datetime, timedelta
 import logging
-from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import aiohttp
-
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
+from homeassistant.helpers.event import async_track_time_change
 
-from .const import API_URL, DEFAULT_TIMEOUT, DOMAIN
+from .live_tracks import NTSLiveTracksHandler
+from .const import (
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_TIMEOUT,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+API_URL = "https://www.nts.live/api/v2/live"
 
 
 class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
@@ -21,6 +31,7 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
         self,
         hass: HomeAssistant,
         update_interval: timedelta,
+        live_tracks_handler: Optional[NTSLiveTracksHandler] = None,
     ) -> None:
         """Initialize the data update coordinator."""
         super().__init__(
@@ -29,10 +40,41 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=update_interval,
         )
+        self.live_tracks_handler = live_tracks_handler
+        self._user_interval = update_interval
+
+    async def _handle_track_update(self, channel: int, tracks: List[dict]) -> None:
+        """Handle track updates from the live tracks handler."""
+        _LOGGER.debug(
+            "Received track update for channel %s with %s tracks", channel, len(tracks)
+        )
+
+        # Update our data with the new tracks
+        if self.data:
+            channel_key = f"channel_{channel}"
+            if channel_key in self.data:
+                current_track = tracks[0] if tracks else None
+                self.data[channel_key]["current_track"] = (
+                    current_track if current_track else None
+                )
+                self.data[channel_key]["recent_tracks"] = [
+                    track for track in tracks[:10]
+                ]
+
+                # Notify listeners of the update
+                self.async_set_updated_data(self.data)
+                _LOGGER.info(
+                    "Updated channel %s with track: %s",
+                    channel,
+                    current_track if current_track else "None",
+                )
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from NTS Radio API."""
         try:
+            # Calculate next update time to align with :00 and :30
+            self._schedule_next_update()
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     API_URL, timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
@@ -46,11 +88,34 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
                     for channel_data in data.get("results", []):
                         channel_name = channel_data.get("channel_name")
                         if channel_name:
-                            processed_data[f"channel_{channel_name}"] = {
+                            channel_key = f"channel_{channel_name}"
+                            processed_data[channel_key] = {
                                 "channel_name": channel_name,
                                 "now": channel_data.get("now", {}),
                                 "next": channel_data.get("next", {}),
                             }
+
+                            # Add live track data if available
+                            if (
+                                self.live_tracks_handler
+                                and self.live_tracks_handler.is_authenticated
+                            ):
+                                channel_num = int(channel_name)
+                                current_track = (
+                                    self.live_tracks_handler.get_current_track(
+                                        channel_num
+                                    )
+                                )
+                                recent_tracks = self.live_tracks_handler.get_tracks(
+                                    channel_num
+                                )
+
+                                processed_data[channel_key]["current_track"] = (
+                                    current_track if current_track else None
+                                )
+                                processed_data[channel_key]["recent_tracks"] = [
+                                    track for track in recent_tracks[:10]
+                                ]
 
                     return processed_data
 
@@ -58,3 +123,34 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error communicating with API: {err}")
         except Exception as err:
             raise UpdateFailed(f"Unexpected error: {err}")
+
+    def _schedule_next_update(self) -> None:
+        """Schedule the next update to align with :00 and :30 minutes."""
+        now = dt_util.now()
+        current_minute = now.minute
+        current_second = now.second
+
+        # Calculate seconds until next :00 or :30
+        if current_minute < 30:
+            # Next update at :30
+            seconds_until_next = (30 - current_minute) * 60 - current_second
+        else:
+            # Next update at :00 of next hour
+            seconds_until_next = (60 - current_minute) * 60 - current_second
+
+        # Add a small buffer (2 seconds) to ensure we're past the hour/half-hour mark
+        seconds_until_next += 2
+
+        # If the calculated time is longer than user's preferred interval, use the user's interval
+        next_interval = timedelta(seconds=seconds_until_next)
+        if next_interval > self._user_interval:
+            next_interval = self._user_interval
+
+        # Update the coordinator's update interval for the next cycle
+        self.update_interval = next_interval
+
+        _LOGGER.debug(
+            "Next update scheduled in %s seconds (at %s)",
+            next_interval.total_seconds(),
+            now + next_interval,
+        )

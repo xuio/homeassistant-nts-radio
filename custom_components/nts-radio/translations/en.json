@@ -5,7 +5,14 @@
         "title": "Configure NTS Radio",
         "description": "Set up the NTS Radio integration to see what's currently playing on both channels.",
         "data": {
-          "update_interval": "Update interval (seconds)"
+          "update_interval": "Update interval (seconds)",
+          "email": "Email (optional - for track IDs)",
+          "password": "Password (optional - for track IDs)"
+        },
+        "data_description": {
+          "update_interval": "How often to check for updates. The integration will always update at :00 and :30 to catch new shows immediately.",
+          "email": "Your NTS Supporter account email for accessing track information.",
+          "password": "Your NTS Supporter account password for accessing track information."
         }
       }
     },
