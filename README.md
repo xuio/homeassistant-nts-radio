@@ -18,6 +18,10 @@ This custom integration allows you to track what's currently playing on NTS Radi
 
 ## Installation
 
+### HACS Installation
+
+Install this Integration via HACS by adding this repo as a custom repository.
+
 ### Manual Installation
 
 1. Copy the `nts-radio` folder to your `config/custom_components/` directory
@@ -25,10 +29,6 @@ This custom integration allows you to track what's currently playing on NTS Radi
 3. Go to Configuration > Integrations
 4. Click the "+" button and search for "NTS Radio"
 5. Follow the configuration steps
-
-### HACS Installation (Future)
-
-This integration is not yet available in HACS but may be added in the future.
 
 ## Configuration
 
