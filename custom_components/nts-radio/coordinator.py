@@ -42,6 +42,7 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.live_tracks_handler = live_tracks_handler
         self._user_interval = update_interval
+        self._last_scheduled_update = None
 
     async def _handle_track_update(self, channel: int, tracks: List[dict]) -> None:
         """Handle track updates from the live tracks handler."""
@@ -72,9 +73,14 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from NTS Radio API."""
         try:
-            # Calculate next update time to align with :00 and :30
-            self._schedule_next_update()
-
+            # Don't modify the update interval here - let the coordinator handle regular updates
+            # The scheduled updates at :00 and :30 are handled separately in __init__.py
+            
+            _LOGGER.debug(
+                "Performing periodic update. Update interval: %s seconds",
+                self._user_interval.total_seconds()
+            )
+            
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     API_URL, timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
@@ -126,31 +132,6 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _schedule_next_update(self) -> None:
         """Schedule the next update to align with :00 and :30 minutes."""
-        now = dt_util.now()
-        current_minute = now.minute
-        current_second = now.second
-
-        # Calculate seconds until next :00 or :30
-        if current_minute < 30:
-            # Next update at :30
-            seconds_until_next = (30 - current_minute) * 60 - current_second
-        else:
-            # Next update at :00 of next hour
-            seconds_until_next = (60 - current_minute) * 60 - current_second
-
-        # Add a small buffer (2 seconds) to ensure we're past the hour/half-hour mark
-        seconds_until_next += 2
-
-        # If the calculated time is longer than user's preferred interval, use the user's interval
-        next_interval = timedelta(seconds=seconds_until_next)
-        if next_interval > self._user_interval:
-            next_interval = self._user_interval
-
-        # Update the coordinator's update interval for the next cycle
-        self.update_interval = next_interval
-
-        _LOGGER.debug(
-            "Next update scheduled in %s seconds (at %s)",
-            next_interval.total_seconds(),
-            now + next_interval,
-        )
+        # This method is no longer needed since we're handling scheduled updates separately
+        # and letting the coordinator handle regular periodic updates
+        pass

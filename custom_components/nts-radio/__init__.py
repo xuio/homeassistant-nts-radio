@@ -30,6 +30,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     email = entry.data.get(CONF_EMAIL)
     password = entry.data.get(CONF_PASSWORD)
 
+    _LOGGER.info(
+        "Setting up NTS Radio with update interval: %s seconds", update_interval
+    )
+
     # Initialize coordinator first
     coordinator = NTSRadioDataUpdateCoordinator(
         hass,
