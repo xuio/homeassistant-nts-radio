@@ -54,10 +54,8 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
         self._user_interval = update_interval
         self._last_scheduled_update = None
 
-        # favourites list cache
-        self.data = {}  # initialise here (super already sets but ensure type)
-        if favourites_enabled:
-            self.data["favourites"] = []
+        # Flag to track favourites functionality
+        self._favourites_enabled = favourites_enabled
 
     async def _handle_track_update(self, channel: int, tracks: List[dict]) -> None:
         """Handle track updates from the live tracks handler."""
@@ -89,13 +87,10 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
         """Handle favourites list update."""
         _LOGGER.debug("Received favourites update with %s shows", len(favourites))
 
-        # Ensure data dict exists
-        if self.data is None:
-            self.data = {}
-
-        self.data["favourites"] = favourites
-        # Notify listeners
-        self.async_set_updated_data(self.data)
+        # Merge favourites into a copy of current coordinator data and notify listeners
+        merged = dict(self.data or {})
+        merged["favourites"] = favourites
+        self.async_set_updated_data(merged)
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from NTS Radio API."""
@@ -180,8 +175,8 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
                                     track for track in recent_tracks[:10]
                                 ]
 
-                    # Preserve favourites list if we already have one
-                    if self.data and "favourites" in self.data:
+                    # Carry over favourites list (kept separately)
+                    if self._favourites_enabled and self.data and "favourites" in self.data:
                         processed_data["favourites"] = self.data["favourites"]
 
                     return processed_data
