@@ -104,8 +104,13 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
             )
             
             async with aiohttp.ClientSession() as session:
+                # Add a timestamp query parameter to circumvent any CDN caching that may delay
+                # refreshed schedule data (observed ~10-minute lag). The API ignores unknown
+                # query parameters, so this is safe.
                 async with session.get(
-                    API_URL, timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
+                    API_URL,
+                    params={"_": int(dt_util.utcnow().timestamp())},
+                    timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
                 ) as response:
                     if response.status != 200:
                         raise UpdateFailed(f"Error fetching data: {response.status}")
