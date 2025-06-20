@@ -90,12 +90,15 @@ class NTSLiveTracksHandler:
         password: Optional[str],
         update_callback: Optional[Callable[[int, List[Dict[str, Any]]], Awaitable[None]]] = None,
         favourites_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
+        *,
+        ignore_unknown_tracks: bool = True,
     ) -> None:
         self.hass = hass
         self.email = email
         self.password = password
         self._update_callback = update_callback
         self._favourites_callback = favourites_callback
+        self._ignore_unknown = ignore_unknown_tracks
 
         self._client: Any = None  # NTSClient when import succeeds
         self._authenticated = False
@@ -232,10 +235,16 @@ class NTSLiveTracksHandler:
     # ------------------------------------------------------------------
 
     def _event_to_dict(self, event: Any) -> Dict[str, Any]:  # Accept any event-like object
-        _LOGGER.debug("NTS Radio: event_to_dict: %s", event)
-        """Convert a *LiveTrackEvent* named-tuple to the dict format used by sensors."""
+        """Convert a *LiveTrackEvent* named-tuple to dict; return empty if unknown and filtering enabled."""
         if event is None:
             return {}
+
+        # Determine if track has content
+        has_artist = bool(event.artist_names)
+        has_title = bool(event.song_title)
+
+        if self._ignore_unknown and not (has_artist or has_title):
+            return {}  # Skip unknown track
 
         artists_str = ", ".join(event.artist_names)
         return {

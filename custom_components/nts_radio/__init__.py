@@ -15,6 +15,8 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    CONF_IGNORE_UNKNOWN_TRACKS,
+    DEFAULT_IGNORE_UNKNOWN_TRACKS,
 )
 from .coordinator import NTSRadioDataUpdateCoordinator
 from .live_tracks import NTSLiveTracksHandler
@@ -26,9 +28,16 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up NTS Radio from a config entry."""
-    update_interval = entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+    update_interval = entry.options.get(
+        CONF_UPDATE_INTERVAL,
+        entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
+    )
     email = entry.data.get(CONF_EMAIL)
     password = entry.data.get(CONF_PASSWORD)
+    ignore_unknown_tracks = entry.options.get(
+        CONF_IGNORE_UNKNOWN_TRACKS,
+        entry.data.get(CONF_IGNORE_UNKNOWN_TRACKS, DEFAULT_IGNORE_UNKNOWN_TRACKS),
+    )
 
     _LOGGER.info(
         "Setting up NTS Radio with update interval: %s seconds", update_interval
@@ -51,6 +60,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             password,
             update_callback=coordinator._handle_track_update,
             favourites_callback=coordinator._handle_favourites_update,
+            ignore_unknown_tracks=ignore_unknown_tracks,
         )
         if await live_tracks_handler.async_init():
             await live_tracks_handler.async_start()

@@ -10,12 +10,14 @@ DOMAIN = "nts_radio"
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
+CONF_IGNORE_UNKNOWN_TRACKS = "ignore_unknown_tracks"
 
 # Default values
 DEFAULT_UPDATE_INTERVAL = 50  # seconds
-MIN_UPDATE_INTERVAL = 10
+MIN_UPDATE_INTERVAL = 5
 MAX_UPDATE_INTERVAL = 300
 DEFAULT_TIMEOUT = 30  # seconds
+DEFAULT_IGNORE_UNKNOWN_TRACKS = True
 
 # Firebase configuration from decompiled app
 FIREBASE_CONFIG = {
