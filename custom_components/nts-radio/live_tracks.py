@@ -1,355 +1,252 @@
-"""Live tracks handler for NTS Radio integration."""
+"""Live tracks handler for NTS Radio integration using the async gRPC Firestore API (nts-python).
+
+This implementation relies on the helper library that lives in the
+`custom_components/nts_radio/nts-python` folder.  Since that folder name contains
+an illegal dash ("-"), we add the folder itself to `sys.path` and import the
+modules directly from there.
+
+The public interface (`NTSLiveTracksHandler`) is kept identical to the previous
+version so that the rest of the integration (coordinator, sensors, …) continues
+working unchanged.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import html
-import json
 import logging
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+import os
+import sys
+from typing import Any, Callable, Dict, List, Optional, Awaitable
+import importlib.util
 
-import aiohttp
-
-from homeassistant.core import HomeAssistant
-from homeassistant.util import dt as dt_util
-
-from .const import FIREBASE_CONFIG
+from homeassistant.core import HomeAssistant  # type: ignore
 
 _LOGGER = logging.getLogger(__name__)
 
-# Track record limit
+# Keep the same constant so the coordinator does not need to be changed.
 TRACK_LIMIT = 15
 
-# Firebase Auth REST API
-FIREBASE_AUTH_URL = (
-    "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
-)
-FIREBASE_REFRESH_URL = "https://securetoken.googleapis.com/v1/token"
-FIRESTORE_URL = (
-    "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents"
-)
+# -----------------------------------------------------------------------------
+# Dynamically load the nts-python helper package
+# -----------------------------------------------------------------------------
 
+_NTS_PKG_PATH = os.path.join(os.path.dirname(__file__), "nts-python")
+if _NTS_PKG_PATH not in sys.path:
+    sys.path.insert(0, _NTS_PKG_PATH)
+
+# The helper library expects to be imported as the package "nts_radio_async_api".
+# Because the folder on disk is named "nts-python", we load it manually and
+# register it under that package name so that its internal relative imports
+# (e.g. "from .auth import …") continue to work.
+
+_PKG_NAME = "nts_radio_async_api"
+_PKG_INIT_FILE = os.path.join(_NTS_PKG_PATH, "__init__.py")
+
+try:
+    spec = importlib.util.spec_from_file_location(
+        _PKG_NAME, _PKG_INIT_FILE, submodule_search_locations=[_NTS_PKG_PATH]
+    )
+    if spec and spec.loader:  # safety check
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[_PKG_NAME] = module
+        spec.loader.exec_module(module)
+
+        # Pull wanted symbols
+        from nts_radio_async_api import NTSClient, LiveTrackEvent  # type: ignore  # noqa: E402
+    else:  # pragma: no cover
+        raise ImportError("Could not create module spec for nts-python helper package")
+
+except Exception as exc:  # pragma: no cover
+    # We purposefully catch *all* exceptions here because the package may be
+    # missing its heavy dependencies (grpc, google-cloud-firestore, …) or the
+    # import machinery could not initialise the package. In those cases we still
+    # want Home Assistant to start; real-time track updates will just be
+    # unavailable.
+    _LOGGER.error(
+        "Failed to import nts-python async client – live track updates disabled: %s",
+        exc,
+    )
+
+    class _FallbackClient:  # pylint: disable=too-few-public-methods
+        async def authenticate(self, *_args, **_kwargs):
+            raise RuntimeError("nts-python package not available")
+
+    NTSClient = _FallbackClient  # type: ignore  # noqa: N816
+    LiveTrackEvent = None  # type: ignore
+
+
+# -----------------------------------------------------------------------------
+# Public handler class used by the rest of the integration
+# -----------------------------------------------------------------------------
 
 class NTSLiveTracksHandler:
-    """Handle live tracks from Firebase."""
+    """Handle real-time live track updates using the async Firestore gRPC API."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         email: Optional[str],
         password: Optional[str],
-        update_callback: Optional[Callable] = None,
+        update_callback: Optional[Callable[[int, List[Dict[str, Any]]], Awaitable[None]]] = None,
+        favourites_callback: Optional[Callable[[List[Dict[str, Any]]], Awaitable[None]]] = None,
     ) -> None:
-        """Initialize the handler."""
         self.hass = hass
         self.email = email
         self.password = password
-        self._authenticated = False
-        self._auth_token = None
-        self._refresh_token = None
-        self._user_id = None
-        self._channel_tracks: Dict[int, List[Dict[str, Any]]] = {1: [], 2: []}
         self._update_callback = update_callback
-        self._update_task = None
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._favourites_callback = favourites_callback
 
-    async def async_init(self) -> bool:
-        """Initialize Firebase connection."""
-        if not self.email or not self.password:
-            _LOGGER.debug("No credentials provided, skipping Firebase init")
-            return False
+        self._client: Any = None  # NTSClient when import succeeds
+        self._authenticated = False
 
-        try:
-            self._session = aiohttp.ClientSession()
+        # Per-channel track ring-buffer (most-recent first)
+        self._channel_tracks: Dict[int, List[Dict[str, Any]]] = {1: [], 2: []}
 
-            # Authenticate with Firebase
-            auth_data = {
-                "email": self.email,
-                "password": self.password,
-                "returnSecureToken": True,
-            }
+        # Tasks that run the Firestore streaming listeners
+        self._listen_tasks: List[asyncio.Task] = []
 
-            async with self._session.post(
-                f"{FIREBASE_AUTH_URL}?key={FIREBASE_CONFIG['apiKey']}", json=auth_data
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    self._auth_token = data.get("idToken")
-                    self._refresh_token = data.get("refreshToken")
-                    self._user_id = data.get("localId")
-                    self._authenticated = True
-                    _LOGGER.info("Successfully authenticated with NTS/Firebase")
-                    _LOGGER.debug("User ID: %s", self._user_id)
-                    return True
-                else:
-                    error_data = await response.json()
-                    error_msg = error_data.get("error", {}).get(
-                        "message", "Unknown error"
-                    )
+        # favourites cache
+        self._favourites: List[Dict[str, Any]] = []
 
-                    if error_msg == "INVALID_EMAIL":
-                        _LOGGER.error("Invalid email address format")
-                    elif error_msg == "EMAIL_NOT_FOUND":
-                        _LOGGER.error(
-                            "Email not found. Please check your NTS account email"
-                        )
-                    elif error_msg == "INVALID_PASSWORD":
-                        _LOGGER.error(
-                            "Invalid password. Please check your NTS account password"
-                        )
-                    elif error_msg == "USER_DISABLED":
-                        _LOGGER.error("This NTS account has been disabled")
-                    else:
-                        _LOGGER.error("Authentication failed: %s", error_msg)
-
-                    return False
-
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Network error during authentication: %s", err)
-            return False
-        except Exception as err:
-            _LOGGER.error("Failed to initialize Firebase: %s", err)
-            return False
-
-    async def async_start(self) -> None:
-        """Start listening for track updates."""
-        if not self._authenticated:
-            return
-
-        # Start update loop
-        self._update_task = asyncio.create_task(self._update_loop())
-
-    async def async_stop(self) -> None:
-        """Stop listening for track updates."""
-        if self._update_task:
-            self._update_task.cancel()
-            try:
-                await self._update_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._session:
-            await self._session.close()
-
-    async def _refresh_auth_token(self) -> bool:
-        """Refresh the authentication token."""
-        if not self._refresh_token:
-            return False
-
-        try:
-            refresh_data = {
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-            }
-
-            async with self._session.post(
-                f"{FIREBASE_REFRESH_URL}?key={FIREBASE_CONFIG['apiKey']}",
-                json=refresh_data,
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    self._auth_token = data.get("id_token")
-                    self._refresh_token = data.get("refresh_token", self._refresh_token)
-                    return True
-                else:
-                    _LOGGER.error("Failed to refresh token")
-                    return False
-
-        except Exception as err:
-            _LOGGER.error("Error refreshing token: %s", err)
-            return False
-
-    async def _update_loop(self) -> None:
-        """Periodically fetch track updates."""
-        while True:
-            try:
-                # Fetch tracks for both channels
-                for channel in [1, 2]:
-                    await self._fetch_channel_tracks(channel)
-
-                # Wait before next update
-                await asyncio.sleep(30)  # Update every 30 seconds
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as err:
-                _LOGGER.error("Error in update loop: %s", err)
-                # Try to refresh token
-                if await self._refresh_auth_token():
-                    _LOGGER.info("Successfully refreshed auth token")
-                await asyncio.sleep(60)  # Wait longer on error
-
-    async def _fetch_channel_tracks(self, channel: int) -> None:
-        """Fetch tracks for a channel."""
-        if not self._auth_token:
-            return
-
-        try:
-            # Use the same pathname format as the desktop app
-            stream_pathname = "/stream" if channel == 1 else "/stream2"
-
-            # Query Firestore using REST API
-            url = f"{FIRESTORE_URL.format(FIREBASE_CONFIG['projectId'])}/live_tracks"
-
-            # Build structured query
-            query = {
-                "structuredQuery": {
-                    "from": [{"collectionId": "live_tracks"}],
-                    "where": {
-                        "fieldFilter": {
-                            "field": {"fieldPath": "stream_pathname"},
-                            "op": "EQUAL",
-                            "value": {"stringValue": stream_pathname},
-                        }
-                    },
-                    "orderBy": [
-                        {
-                            "field": {"fieldPath": "start_time"},
-                            "direction": "DESCENDING",
-                        }
-                    ],
-                    "limit": TRACK_LIMIT,
-                }
-            }
-
-            headers = {
-                "Authorization": f"Bearer {self._auth_token}",
-                "Content-Type": "application/json",
-            }
-
-            # Use the runQuery endpoint for complex queries
-            query_url = f"{FIRESTORE_URL.format(FIREBASE_CONFIG['projectId'])}:runQuery"
-
-            _LOGGER.debug("Fetching tracks for channel %s from: %s", channel, query_url)
-            _LOGGER.debug("Query: %s", json.dumps(query, indent=2))
-
-            async with self._session.post(
-                query_url, json=query, headers=headers
-            ) as response:
-                if response.status == 200:
-                    response_data = await response.json()
-                    _LOGGER.debug(
-                        "Got %d documents for channel %s", len(response_data), channel
-                    )
-
-                    # Process documents and filter out empty tracks
-                    tracks = []
-
-                    for doc_wrapper in response_data:
-                        if "document" not in doc_wrapper:
-                            continue
-
-                        doc = doc_wrapper["document"]
-                        fields = doc.get("fields", {})
-
-                        # Extract artist names
-                        artists = []
-                        artist_names = fields.get("artist_names", {})
-                        if (
-                            "arrayValue" in artist_names
-                            and "values" in artist_names["arrayValue"]
-                        ):
-                            for artist in artist_names["arrayValue"]["values"]:
-                                if "stringValue" in artist and artist["stringValue"]:
-                                    # Decode HTML entities in artist names
-                                    artist_name = html.unescape(artist["stringValue"])
-                                    artists.append(artist_name)
-
-                        # Extract song title
-                        song_title = ""
-                        if (
-                            "song_title" in fields
-                            and "stringValue" in fields["song_title"]
-                        ):
-                            # Decode HTML entities in song title
-                            song_title = html.unescape(fields["song_title"]["stringValue"])
-
-                        # Only add tracks that have either artists or title (not empty)
-                        if artists or song_title:
-                            # Extract timestamp
-                            start_time = None
-                            if (
-                                "start_time" in fields
-                                and "timestampValue" in fields["start_time"]
-                            ):
-                                start_time = fields["start_time"]["timestampValue"]
-
-                            # Format artists as a comma-separated string
-                            artists_str = ", ".join(artists) if artists else ""
-
-                            track = {
-                                "artists": artists_str,
-                                "title": song_title,
-                                "start_time": start_time,
-                            }
-                            tracks.append(track)
-                            _LOGGER.debug(
-                                "Found track with content: %s - %s",
-                                artists_str if artists_str else "Unknown",
-                                song_title,
-                            )
-                        else:
-                            _LOGGER.debug("Skipped empty track")
-
-                    # Update channel data with filtered tracks
-                    self._channel_tracks[channel] = tracks
-                    _LOGGER.info(
-                        "Updated channel %s with %s tracks (filtered from %s)",
-                        channel,
-                        len(tracks),
-                        len(response_data),
-                    )
-
-                    # Log the latest track with content
-                    if tracks:
-                        latest = tracks[0]
-                        _LOGGER.info(
-                            "Latest track on channel %s: %s - %s",
-                            channel,
-                            latest["artists"],
-                            latest["title"],
-                        )
-                    else:
-                        _LOGGER.info(
-                            "No tracks with content found for channel %s", channel
-                        )
-
-                    # Notify coordinator with callback
-                    if self._update_callback:
-                        await self._update_callback(channel, tracks)
-
-                elif response.status == 401:
-                    # Token expired, try to refresh
-                    _LOGGER.warning("Token expired, attempting refresh")
-                    if await self._refresh_auth_token():
-                        # Retry the request
-                        await self._fetch_channel_tracks(channel)
-                elif response.status == 403:
-                    error_text = await response.text()
-                    _LOGGER.error(
-                        "Access denied to track data. Response: %s", error_text
-                    )
-                else:
-                    error_text = await response.text()
-                    _LOGGER.error(
-                        "Error fetching tracks for channel %s: %s - %s",
-                        channel,
-                        response.status,
-                        error_text,
-                    )
-
-        except Exception as err:
-            _LOGGER.error("Error fetching tracks for channel %s: %s", channel, err)
-
-    def get_tracks(self, channel: int) -> List[Dict[str, Any]]:
-        """Get current tracks for a channel (filtered to only show tracks with content)."""
-        return self._channel_tracks.get(channel, [])
-
-    def get_current_track(self, channel: int) -> Optional[Dict[str, Any]]:
-        """Get the most recent track with content for a channel."""
-        tracks = self._channel_tracks.get(channel, [])
-        return tracks[0] if tracks else None
+    # ------------------------------------------------------------------
+    # Public helpers expected by the coordinator / sensors
+    # ------------------------------------------------------------------
 
     @property
     def is_authenticated(self) -> bool:
-        """Return if handler is authenticated."""
         return self._authenticated
+
+    def get_tracks(self, channel: int) -> List[Dict[str, Any]]:
+        """Return the cached track list for *channel* (most-recent first)."""
+        return self._channel_tracks.get(channel, [])
+
+    def get_current_track(self, channel: int) -> Optional[Dict[str, Any]]:
+        tracks = self.get_tracks(channel)
+        return tracks[0] if tracks else None
+
+    # ------------------------------------------------------------------
+    # Home Assistant lifecycle helpers
+    # ------------------------------------------------------------------
+
+    async def async_init(self) -> bool:
+        """Authenticate against Firebase via the helper client."""
+        if not self.email or not self.password:
+            _LOGGER.debug("NTS Radio: No credentials provided – skipping authentication")
+            return False
+
+        self._client = NTSClient()
+        try:
+            await self._client.authenticate(self.email, self.password)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("NTS Radio: Authentication failed – %s", exc)
+            return False
+
+        self._authenticated = True
+        return True
+
+    async def async_start(self) -> None:
+        """Start listening for live track updates on both channels."""
+        if not self._authenticated or not self._client:
+            return
+
+        # Channels are labelled as strings "1" and "2" for the API.
+        for ch in (1, 2):
+            task = asyncio.create_task(self._listen_channel(ch))
+            self._listen_tasks.append(task)
+
+        # watch favourites (single task)
+        task_fav = asyncio.create_task(self._listen_favourites())
+        self._listen_tasks.append(task_fav)
+
+    async def async_stop(self) -> None:
+        """Cancel listener tasks and wait for them to finish."""
+        for task in self._listen_tasks:
+            task.cancel()
+        for task in self._listen_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._listen_tasks.clear()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _listen_channel(self, channel: int) -> None:
+        """Listen for track updates on the given *channel* (1 or 2)."""
+        assert self._client  # for type-checker
+
+        api_channel = str(channel)
+        buffer: List[Dict[str, Any]] = self._channel_tracks[channel]
+
+        try:
+            async for event in self._client.listen_live_tracks(api_channel, initial_snapshot=False):
+                track = self._event_to_dict(event)
+
+                if not track:
+                    continue
+
+                # de-duplication: compare with most recent track
+                if buffer and buffer[0]["start_time"] == track["start_time"]:
+                    continue  # same track already at head of list
+
+                buffer.insert(0, track)
+                # limit buffer size
+                del buffer[TRACK_LIMIT:]
+
+                _LOGGER.debug("NTS Radio: got track on channel %s – %s - %s", channel, track.get("artists"), track.get("title"))
+
+                # Notify coordinator
+                if self._update_callback:
+                    await self._update_callback(channel, buffer)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("NTS Radio: Listener for channel %s stopped due to error: %s", channel, exc)
+
+    # ------------------------------------------------------------------
+    # Favourites listener
+    # ------------------------------------------------------------------
+
+    async def _listen_favourites(self) -> None:
+        """Listen for favourites list changes and maintain local cache."""
+        if not self._client:
+            return
+
+        try:
+            async for favourites in self._client.watch_favourites_with_details(cache=True):
+                self._favourites = favourites
+                _LOGGER.debug("NTS Radio: Updated favourites list (%d items)", len(favourites))
+
+                if self._favourites_callback:
+                    await self._favourites_callback(favourites)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error("NTS Radio: Favourites listener stopped due to error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Conversion helpers
+    # ------------------------------------------------------------------
+
+    def _event_to_dict(self, event: Any) -> Dict[str, Any]:  # Accept any event-like object
+        _LOGGER.debug("NTS Radio: event_to_dict: %s", event)
+        """Convert a *LiveTrackEvent* named-tuple to the dict format used by sensors."""
+        if event is None:
+            return {}
+
+        artists_str = ", ".join(event.artist_names)
+        return {
+            "artists": html.unescape(artists_str),
+            "title": html.unescape(event.song_title),
+            "start_time": event.start_time,
+        }
+
+    # ------------------------------------------------------------------
+    # Accessors
+    # ------------------------------------------------------------------
+
+    def get_favourites(self) -> List[Dict[str, Any]]:
+        return self._favourites

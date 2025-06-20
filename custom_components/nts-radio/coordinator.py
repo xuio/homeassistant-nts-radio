@@ -40,6 +40,8 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         update_interval: timedelta,
         live_tracks_handler: Optional[NTSLiveTracksHandler] = None,
+        *,
+        favourites_enabled: bool = False,
     ) -> None:
         """Initialize the data update coordinator."""
         super().__init__(
@@ -51,6 +53,11 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
         self.live_tracks_handler = live_tracks_handler
         self._user_interval = update_interval
         self._last_scheduled_update = None
+
+        # favourites list cache
+        self.data = {}  # initialise here (super already sets but ensure type)
+        if favourites_enabled:
+            self.data["favourites"] = []
 
     async def _handle_track_update(self, channel: int, tracks: List[dict]) -> None:
         """Handle track updates from the live tracks handler."""
@@ -77,6 +84,18 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
                     channel,
                     current_track if current_track else "None",
                 )
+
+    async def _handle_favourites_update(self, favourites: List[dict]) -> None:
+        """Handle favourites list update."""
+        _LOGGER.debug("Received favourites update with %s shows", len(favourites))
+
+        # Ensure data dict exists
+        if self.data is None:
+            self.data = {}
+
+        self.data["favourites"] = favourites
+        # Notify listeners
+        self.async_set_updated_data(self.data)
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from NTS Radio API."""
@@ -160,6 +179,10 @@ class NTSRadioDataUpdateCoordinator(DataUpdateCoordinator):
                                 processed_data[channel_key]["recent_tracks"] = [
                                     track for track in recent_tracks[:10]
                                 ]
+
+                    # Preserve favourites list if we already have one
+                    if self.data and "favourites" in self.data:
+                        processed_data["favourites"] = self.data["favourites"]
 
                     return processed_data
 

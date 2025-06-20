@@ -21,7 +21,7 @@ from .live_tracks import NTSLiveTracksHandler
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -39,13 +39,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         update_interval=timedelta(seconds=update_interval),
         live_tracks_handler=None,
+        favourites_enabled=True,
     )
 
     # Initialize live tracks handler if credentials provided
     live_tracks_handler = None
     if email and password:
         live_tracks_handler = NTSLiveTracksHandler(
-            hass, email, password, update_callback=coordinator._handle_track_update
+            hass,
+            email,
+            password,
+            update_callback=coordinator._handle_track_update,
+            favourites_callback=coordinator._handle_favourites_update,
         )
         if await live_tracks_handler.async_init():
             await live_tracks_handler.async_start()
