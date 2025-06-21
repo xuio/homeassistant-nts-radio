@@ -113,4 +113,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if live_tracks_handler := entry_data.get("live_tracks_handler"):
             await live_tracks_handler.async_stop()
 
+        # Close coordinator HTTP session
+        coordinator: NTSRadioDataUpdateCoordinator = entry_data.get("coordinator")
+        if coordinator:
+            await coordinator.async_close()
+
     return unload_ok
